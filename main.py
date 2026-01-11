@@ -365,78 +365,49 @@ def wait_for_email_and_download(driver, curp, download_dir):
     else:
         logger.warning("Could not find 'Save to device' button")
     
-    # Find downloaded PDF in internal storage Downloads
+    # Find downloaded PDF in Downloads
     logger.info("Searching for downloaded PDF...")
     time.sleep(3)
     
-    # Try multiple common Downloads paths
-    download_paths = [
-        "/sdcard/Download",
-        "/storage/emulated/0/Download",
-        "/storage/self/primary/Download",
-    ]
+    download_path = "/sdcard/Download"
     
-    pdf_path = None
+    list_result = subprocess.run(
+        ["adb", "shell", "ls", "-la", download_path],
+        capture_output=True,
+        text=True,
+        timeout=10
+    )
     
-    for download_path in download_paths:
+    if list_result.returncode != 0:
+        raise Exception(f"Could not access {download_path}")
+    
+    # Parse PDF files from ls -la output
+    pdf_files = []
+    for line in list_result.stdout.split("\n"):
+        if ".pdf" in line and line.strip().startswith("-"):
+            parts = line.split()
+            if len(parts) >= 8:
+                filename = " ".join(parts[7:])
+                if filename.endswith(".pdf"):
+                    date_str = " ".join(parts[5:7])
+                    pdf_files.append((filename, date_str))
+    
+    if not pdf_files:
+        raise Exception("Could not find downloaded PDF")
+    
+    # Sort by date (most recent first)
+    def parse_date(date_str):
         try:
-            logger.info(f"Checking {download_path}...")
-            # List all files first
-            list_result = subprocess.run(
-                ["adb", "shell", "ls", "-la", download_path],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if list_result.returncode == 0:
-                logger.info(f"Files in {download_path}:\n{list_result.stdout}")
-                
-                # Parse PDF files directly from ls -la output
-                pdf_files = []
-                for line in list_result.stdout.split("\n"):
-                    if ".pdf" in line and line.strip().startswith("-"):
-                        # Extract filename and date
-                        # Format: -rwxrwx--- 1 owner group size date time filename
-                        # Fields: 0=perms, 1=links, 2=owner, 3=group, 4=size, 5=date, 6=time, 7+=filename
-                        parts = line.split()
-                        if len(parts) >= 8:
-                            # Filename is everything after the time field (index 7 onwards)
-                            # Join all parts from index 7 to handle filenames with spaces
-                            filename = " ".join(parts[7:])
-                            if filename.endswith(".pdf"):
-                                # Get date/time (parts 5 and 6: format is "2026-01-11" "09:34")
-                                date_str = " ".join(parts[5:7])  # e.g., "2026-01-11 09:34"
-                                pdf_files.append((filename, date_str, line))
-                
-                if pdf_files:
-                    # Sort by date (most recent first)
-                    def parse_date(date_str):
-                        try:
-                            # Format is "2026-01-11 09:34" or "Jan 11 09:34"
-                            if "-" in date_str.split()[0]:  # ISO format
-                                return datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-                            else:  # "Jan 11 09:34" format
-                                current_year = datetime.now().year
-                                return datetime.strptime(f"{current_year} {date_str}", "%Y %b %d %H:%M")
-                        except:
-                            # If parsing fails, use current time (will be last in sort)
-                            return datetime.now()
-                    
-                    pdf_files.sort(key=lambda x: parse_date(x[1]), reverse=True)
-                    logger.info(f"Found {len(pdf_files)} PDF file(s) in {download_path}:")
-                    for i, (filename, date, _) in enumerate(pdf_files[:10], 1):
-                        logger.info(f"  {i}. {filename} ({date})")
-                    pdf_path = f"{download_path}/{pdf_files[0][0]}"
-                    logger.info(f"Using most recent PDF: {pdf_path}")
-                    break
+            if "-" in date_str.split()[0]:
+                return datetime.strptime(date_str, "%Y-%m-%d %H:%M")
             else:
-                logger.debug(f"Path {download_path} does not exist or is not accessible")
-        except Exception as e:
-            logger.debug(f"Error checking {download_path}: {e}")
-            continue
+                current_year = datetime.now().year
+                return datetime.strptime(f"{current_year} {date_str}", "%Y %b %d %H:%M")
+        except:
+            return datetime.now()
     
-    if not pdf_path:
-        raise Exception("Could not find downloaded PDF in any Downloads directory")
+    pdf_files.sort(key=lambda x: parse_date(x[1]), reverse=True)
+    pdf_path = f"{download_path}/{pdf_files[0][0]}"
     
     # Rename PDF on device to just CURP.pdf
     filename = f"{curp}.pdf"
