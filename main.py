@@ -312,10 +312,17 @@ def wait_for_email_and_download(driver, curp, download_dir):
     d.app_wait(OUTLOOK_PACKAGE, timeout=10)
     time.sleep(5)
     
-    # Click first email (newest)
-    logger.info("Opening first email...")
+    # Click email below the ad (ad ends around y=789, email should be below)
+    logger.info("Clicking email below ad...")
     width, height = d.window_size()
-    d.click(width//2, int(height * 0.30))
+    
+    # Ad content-desc shows bounds [0,548][1080,789], so email is below y=800
+    # Click at middle x, around y=900 (below ad, above bottom nav)
+    click_x = width // 2
+    click_y = 900  # Below ad area, in email list area
+    
+    logger.info(f"Clicking at ({click_x}, {click_y}) - below ad area")
+    d.click(click_x, click_y)
     time.sleep(4)
     
     # Click PDF attachment button
@@ -472,134 +479,40 @@ def log_error(error_type, message, curp=None, nss=None):
         f.write(f"{timestamp}|{error_type}|{message}|CURP:{curp or 'N/A'}|NSS:{nss or 'N/A'}\n")
     logger.error(f"Error logged: {error_type} - {message}")
 
-def get_latest_outlook_pdf(curp, download_dir):
-    logger.info("Searching for latest Outlook PDF...")
-
-    # Try multiple locations where Outlook might store PDFs
-    search_paths = [
-        "/sdcard/Android/data/com.microsoft.office.outlook/files",
-        "/sdcard/Android/data/com.microsoft.office.outlook/cache",
-        "/sdcard/Download",
-        "/storage/emulated/0/Download",
-        "/sdcard/Android/data/com.microsoft.office.outlook",
-    ]
-    
-    latest_pdf = None
-    latest_time = 0
-    
-    for base_path in search_paths:
-        try:
-            # Find all PDFs recursively, get modification time
-            result = subprocess.run(
-                ["adb", "shell", "find", base_path, "-type", "f", "-name", "*.pdf", "-exec", "stat", "-c", "%Y %n", "{}", ";"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            
-            if result.stdout.strip():
-                for line in result.stdout.strip().splitlines():
-                    try:
-                        parts = line.split(' ', 1)
-                        if len(parts) == 2:
-                            mtime = int(parts[0])
-                            filepath = parts[1].strip()
-                            # Validate it's actually a PDF file, not a directory
-                            if filepath.endswith('.pdf') and filepath and mtime > latest_time:
-                                latest_time = mtime
-                                latest_pdf = filepath
-                    except:
-                        continue
-        except Exception as e:
-            logger.debug(f"Error searching {base_path}: {e}")
-            continue
-    
-    # Fallback: try simple find and sort by time
-    if not latest_pdf:
-        try:
-            result = subprocess.run(
-                ["adb", "shell", "find", "/sdcard", "-type", "f", "-name", "*.pdf", "-mtime", "-1"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.stdout.strip():
-                files = [f.strip() for f in result.stdout.strip().splitlines() if f.strip().endswith('.pdf')]
-                if files:
-                    # Get the most recently modified
-                    for filepath in files:
-                        try:
-                            result = subprocess.run(
-                                ["adb", "shell", "stat", "-c", "%Y", filepath],
-                                capture_output=True,
-                                text=True,
-                                timeout=5
-                            )
-                            if result.stdout.strip():
-                                mtime = int(result.stdout.strip())
-                                if mtime > latest_time:
-                                    latest_time = mtime
-                                    latest_pdf = filepath
-                        except:
-                            continue
-        except Exception as e:
-            logger.debug(f"Fallback search failed: {e}")
-
-    if not latest_pdf:
-        raise Exception("No PDF found in Outlook storage or Downloads")
-
-    logger.info(f"Latest PDF found: {latest_pdf}")
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{curp}_{ts}.pdf"
-    dest = download_dir / filename
-
-    result = subprocess.run(["adb", "pull", latest_pdf, str(dest)], capture_output=True, text=True, timeout=30)
-    
-    if result.returncode != 0:
-        raise Exception(f"ADB pull failed: {result.stderr}")
-
-    if not dest.exists() or dest.stat().st_size == 0:
-        raise Exception("ADB pull failed - file not found or empty")
-
-    log_download(curp, str(dest))
-    logger.info(f"PDF saved: {dest} ({dest.stat().st_size} bytes)")
-    return dest
-
 
 def main():
     """Main automation workflow."""
     driver = None
     try:
-        # driver = setup_driver()
-        # wait = WebDriverWait(driver, TIMEOUT)
+        driver = setup_driver()
+        wait = WebDriverWait(driver, TIMEOUT)
         
-        # logger.info("Navigating to SISEC website...")
-        # driver.get(BASE_URL)
-        # wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="email"]')))
+        logger.info("Navigating to SISEC website...")
+        driver.get(BASE_URL)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="email"]')))
         
-        # logger.info("Logging in...")
-        # login(driver)
+        logger.info("Logging in...")
+        login(driver)
         
-        # logger.info("Navigating to semanas-cotizadas...")
-        # driver.get(f"{BASE_URL}semanas-cotizadas")
-        # wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        logger.info("Navigating to semanas-cotizadas...")
+        driver.get(f"{BASE_URL}semanas-cotizadas")
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         
-        # logger.info("Opening query form...")
-        # nueva_consulta_button = wait.until(
-        #     EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Nueva consulta')]"))
-        # )
-        # if not safe_click(driver, nueva_consulta_button):
-        #     raise Exception("Failed to click 'Nueva consulta' button")
+        logger.info("Opening query form...")
+        nueva_consulta_button = wait.until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Nueva consulta')]"))
+        )
+        if not safe_click(driver, nueva_consulta_button):
+            raise Exception("Failed to click 'Nueva consulta' button")
         
-        # wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="dialog"][data-state="open"]')))
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="dialog"][data-state="open"]')))
         
-        # logger.info("Filling form...")
-        # fill_query_form(driver, CURP, NSS)
-        # logger.info(f"[SUCCESS] Form filled - CURP: {CURP}, NSS: {NSS}")
+        logger.info("Filling form...")
+        fill_query_form(driver, CURP, NSS)
+        logger.info(f"[SUCCESS] Form filled - CURP: {CURP}, NSS: {NSS}")
         
         # Submit the query
-        # submit_query(driver)
+        submit_query(driver)
         
         # Wait for email and download PDF
         logger.info("Waiting for email and downloading PDF...")
