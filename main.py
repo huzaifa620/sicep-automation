@@ -14,6 +14,8 @@ import re
 import subprocess
 import xml.etree.ElementTree as ET
 import uiautomator2 as u2
+from uiautomator2.exceptions import AccessibilityServiceAlreadyRegisteredError
+import threading
 
 load_dotenv(override=True)
 
@@ -38,10 +40,15 @@ OUTLOOK_PACKAGE = "com.microsoft.office.outlook"  # Outlook Android package name
 # Download settings
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "downloads"))
 LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
+RECORD_DIR = Path(os.getenv("RECORD_DIR", "recordings"))
+
+# Recording settings
+ENABLE_RECORDING = os.getenv("ENABLE_RECORDING", "false").lower() == "true"
 
 # Setup logging
 LOG_DIR.mkdir(exist_ok=True)
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+RECORD_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -303,8 +310,24 @@ def wait_for_email_and_download(driver, curp, download_dir):
     """Use uiautomator2 to interact with Outlook app directly via ADB."""
     logger.info("Connecting to device using uiautomator2...")
     
-    # Connect to device via ADB
-    d = u2.connect()
+    # Connect to device via ADB with retry on service already registered error
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            d = u2.connect()
+            break
+        except AccessibilityServiceAlreadyRegisteredError:
+            if attempt < max_retries - 1:
+                logger.warning("Accessibility service already registered, stopping uiautomator2 service...")
+                # Stop uiautomator2 service via ADB
+                subprocess.run(["adb", "shell", "am", "force-stop", "com.github.uiautomator"], 
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                subprocess.run(["adb", "shell", "pkill", "-f", "uiautomator"], 
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                time.sleep(2)
+            else:
+                raise
+    
     logger.info("Opening Outlook app...")
     
     # Start Outlook app
@@ -479,11 +502,74 @@ def log_error(error_type, message, curp=None, nss=None):
         f.write(f"{timestamp}|{error_type}|{message}|CURP:{curp or 'N/A'}|NSS:{nss or 'N/A'}\n")
     logger.error(f"Error logged: {error_type} - {message}")
 
+def start_mobile_recording():
+    """Start screen recording on Android device using ADB."""
+    if not ENABLE_RECORDING:
+        return None
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    video_path = RECORD_DIR / f"mobile_{timestamp}.mp4"
+    device_path = "/sdcard/screenrecord_temp.mp4"
+    
+    logger.info(f"Starting mobile screen recording: {video_path}")
+    # Start recording in background (max 3 minutes, can be extended)
+    process = subprocess.Popen(
+        ["adb", "shell", "screenrecord", "--time-limit", "180", device_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+    return process, device_path, video_path
+
+def stop_mobile_recording(recording_info):
+    """Stop mobile recording and pull the video file."""
+    if not ENABLE_RECORDING or not recording_info:
+        return
+    
+    process, device_path, video_path = recording_info
+    
+    logger.info("Stopping mobile screen recording...")
+    # Stop the recording process
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except:
+        try:
+            process.kill()
+        except:
+            pass
+    
+    # Wait a moment for file to be written
+    time.sleep(2)
+    
+    # Pull the video file
+    logger.info(f"Downloading recording to {video_path}...")
+    result = subprocess.run(
+        ["adb", "pull", device_path, str(video_path)],
+        capture_output=True,
+        timeout=30
+    )
+    
+    if result.returncode == 0:
+        logger.info(f"Mobile recording saved: {video_path}")
+        # Clean up device file
+        subprocess.run(
+            ["adb", "shell", "rm", device_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5
+        )
+    else:
+        logger.warning(f"Failed to download recording: {result.stderr.decode()}")
+
 
 def main():
     """Main automation workflow."""
     driver = None
+    mobile_recording = None
     try:
+        # Start mobile recording if enabled
+        if ENABLE_RECORDING:
+            mobile_recording = start_mobile_recording()
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
@@ -536,6 +622,10 @@ def main():
         traceback.print_exc()
         if driver:
             driver.quit()
+    finally:
+        # Stop mobile recording
+        if mobile_recording:
+            stop_mobile_recording(mobile_recording)
 
 if __name__ == "__main__":
     main()
