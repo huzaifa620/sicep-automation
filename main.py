@@ -15,7 +15,6 @@ import subprocess
 import xml.etree.ElementTree as ET
 import uiautomator2 as u2
 from uiautomator2.exceptions import AccessibilityServiceAlreadyRegisteredError
-import threading
 
 load_dotenv(override=True)
 
@@ -482,17 +481,9 @@ def wait_for_email_and_download(driver, curp, download_dir):
                 pass
     
     logger.info(f"PDF renamed on device: {new_pdf_path} ({size} bytes)")
-    log_download(curp, new_pdf_path)
     
     return new_pdf_path
 
-
-def log_download(curp, filepath):
-    """Log successful PDF download."""
-    log_file = LOG_DIR / "downloads.log"
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now().isoformat()}|{curp}|{filepath}\n")
-    logger.info(f"Download logged: {curp} -> {filepath}")
 
 def log_error(error_type, message, curp=None, nss=None):
     """Log errors to a separate error log file."""
@@ -502,74 +493,13 @@ def log_error(error_type, message, curp=None, nss=None):
         f.write(f"{timestamp}|{error_type}|{message}|CURP:{curp or 'N/A'}|NSS:{nss or 'N/A'}\n")
     logger.error(f"Error logged: {error_type} - {message}")
 
-def start_mobile_recording():
-    """Start screen recording on Android device using ADB."""
-    if not ENABLE_RECORDING:
-        return None
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    video_path = RECORD_DIR / f"mobile_{timestamp}.mp4"
-    device_path = "/sdcard/screenrecord_temp.mp4"
-    
-    logger.info(f"Starting mobile screen recording: {video_path}")
-    # Start recording in background (max 3 minutes, can be extended)
-    process = subprocess.Popen(
-        ["adb", "shell", "screenrecord", "--time-limit", "180", device_path],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    return process, device_path, video_path
-
-def stop_mobile_recording(recording_info):
-    """Stop mobile recording and pull the video file."""
-    if not ENABLE_RECORDING or not recording_info:
-        return
-    
-    process, device_path, video_path = recording_info
-    
-    logger.info("Stopping mobile screen recording...")
-    # Stop the recording process
-    try:
-        process.terminate()
-        process.wait(timeout=5)
-    except:
-        try:
-            process.kill()
-        except:
-            pass
-    
-    # Wait a moment for file to be written
-    time.sleep(2)
-    
-    # Pull the video file
-    logger.info(f"Downloading recording to {video_path}...")
-    result = subprocess.run(
-        ["adb", "pull", device_path, str(video_path)],
-        capture_output=True,
-        timeout=30
-    )
-    
-    if result.returncode == 0:
-        logger.info(f"Mobile recording saved: {video_path}")
-        # Clean up device file
-        subprocess.run(
-            ["adb", "shell", "rm", device_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5
-        )
-    else:
-        logger.warning(f"Failed to download recording: {result.stderr.decode()}")
-
 
 def main():
     """Main automation workflow."""
     driver = None
     mobile_recording = None
     try:
-        # Start mobile recording if enabled
-        if ENABLE_RECORDING:
-            mobile_recording = start_mobile_recording()
+ 
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
@@ -622,10 +552,6 @@ def main():
         traceback.print_exc()
         if driver:
             driver.quit()
-    finally:
-        # Stop mobile recording
-        if mobile_recording:
-            stop_mobile_recording(mobile_recording)
 
 if __name__ == "__main__":
     main()
