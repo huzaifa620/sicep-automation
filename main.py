@@ -3,7 +3,6 @@ from appium.options.android import UiAutomator2Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from appium.webdriver.common.appiumby import AppiumBy
 import os
 import time
 import logging
@@ -29,25 +28,15 @@ TIMEOUT = int(os.getenv("SISEC_TIMEOUT"))
 DELAY = float(os.getenv("SISEC_DELAY"))
 APPIUM_SERVER = os.getenv("APPIUM_SERVER")
 
-# Email monitoring settings
-EMAIL_SENDER = "historia.laboral@imss.gob.mx"
-EMAIL_SUBJECT = "Constancia de Semanas Cotizadas del Asegurado"
-EMAIL_WAIT_TIMEOUT = int(os.getenv("EMAIL_WAIT_TIMEOUT", "300"))  # 5 minutes default
-EMAIL_CHECK_INTERVAL = int(os.getenv("EMAIL_CHECK_INTERVAL", "10"))  # Check every 10 seconds
 OUTLOOK_PACKAGE = "com.microsoft.office.outlook"  # Outlook Android package name
 
 # Download settings
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "downloads"))
 LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
-RECORD_DIR = Path(os.getenv("RECORD_DIR", "recordings"))
-
-# Recording settings
-ENABLE_RECORDING = os.getenv("ENABLE_RECORDING", "false").lower() == "true"
 
 # Setup logging
 LOG_DIR.mkdir(exist_ok=True)
 DOWNLOAD_DIR.mkdir(exist_ok=True)
-RECORD_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,18 +55,6 @@ def setup_driver():
     options.automation_name = "UiAutomator2"
     options.device_name = "Android"
     options.browser_name = "Chrome"
-    options.no_reset = True
-    options.new_command_timeout = 300
-    return webdriver.Remote(APPIUM_SERVER, options=options)
-
-def setup_native_driver():
-    """Initialize and return Appium WebDriver for native Android app."""
-    options = UiAutomator2Options()
-    options.platform_name = "Android"
-    options.automation_name = "UiAutomator2"
-    options.device_name = "Android"
-    options.app_package = OUTLOOK_PACKAGE
-    options.app_activity = "com.microsoft.office.outlook.ui.activities.MainActivity"
     options.no_reset = True
     options.new_command_timeout = 300
     return webdriver.Remote(APPIUM_SERVER, options=options)
@@ -165,146 +142,6 @@ def submit_query(driver):
     # The actual email will be sent asynchronously
     logger.info("Query process initiated. Email will be sent shortly...")
 
-def get_ui_dump():
-    """Get UI hierarchy dump using ADB."""
-    # Try method 1: exec-out (direct output)
-    try:
-        result = subprocess.run(
-            ["adb", "exec-out", "uiautomator", "dump", "/dev/tty"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=False
-        )
-        if result.returncode == 0 and result.stdout:
-            # Remove the "UI hierarchy dumped to: /dev/tty" message
-            output = result.stdout
-            if "UI hierarchy dumped to:" in output:
-                xml_start = output.find("<?xml")
-                if xml_start != -1:
-                    output = output[xml_start:]
-            if output.strip().startswith("<?xml"):
-                return output.strip()
-    except Exception as e:
-        logger.debug(f"exec-out method failed: {e}")
-    
-    # Try method 2: dump to file and read
-    dump_path = "/sdcard/window_dump.xml"
-    try:
-        # Dump UI hierarchy to file
-        result = subprocess.run(
-            ["adb", "shell", "uiautomator", "dump", dump_path],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=False
-        )
-        
-        time.sleep(1)  # Wait for file to be written
-        
-        # Read the dump file
-        result = subprocess.run(
-            ["adb", "shell", "cat", dump_path],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=False
-        )
-        
-        if result.returncode == 0 and result.stdout:
-            xml_content = result.stdout.strip()
-            if xml_content.startswith("<?xml"):
-                return xml_content
-    except Exception as e:
-        logger.debug(f"File dump method failed: {e}")
-    
-    # Try method 3: pull the file
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.xml', delete=False) as tmp:
-            tmp_path = tmp.name
-        
-        # Dump to device
-        subprocess.run(
-            ["adb", "shell", "uiautomator", "dump", dump_path],
-            timeout=10,
-            shell=False
-        )
-        time.sleep(1)
-        
-        # Pull file
-        result = subprocess.run(
-            ["adb", "pull", dump_path, tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=False
-        )
-        
-        if result.returncode == 0:
-            with open(tmp_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-            os.unlink(tmp_path)
-            if content.startswith("<?xml"):
-                return content
-    except Exception as e:
-        logger.debug(f"Pull method failed: {e}")
-    
-    raise Exception("All methods failed to get UI dump")
-
-def find_element_by_text(xml_content, text_keywords, clickable=True):
-    """Find element in UI dump by text and return its bounds."""
-    try:
-        root = ET.fromstring(xml_content)
-        for elem in root.iter():
-            text = elem.get("text", "").lower()
-            content_desc = elem.get("content-desc", "").lower()
-            bounds = elem.get("bounds", "")
-            clickable_attr = elem.get("clickable", "false")
-            
-            # Check if text matches keywords
-            matches = any(keyword.lower() in text or keyword.lower() in content_desc for keyword in text_keywords)
-            
-            if matches and bounds and (not clickable or clickable_attr == "true"):
-                # Parse bounds: [x1,y1][x2,y2]
-                match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds)
-                if match:
-                    x1, y1, x2, y2 = map(int, match.groups())
-                    center_x = (x1 + x2) // 2
-                    center_y = (y1 + y2) // 2
-                    logger.debug(f"Found element: text='{text[:50]}', bounds={bounds}, center=({center_x}, {center_y})")
-                    return center_x, center_y
-    except ET.ParseError as e:
-        logger.error(f"XML parse error: {e}")
-        logger.debug(f"XML content (first 500 chars): {xml_content[:500]}")
-    except Exception as e:
-        logger.error(f"Error parsing UI dump: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
-    return None, None
-
-def tap_coordinates(x, y):
-    """Tap at coordinates using ADB."""
-    subprocess.run(["adb", "shell", "input", "tap", str(x), str(y)], timeout=5)
-    time.sleep(1)
-
-def swipe_down():
-    """Swipe down to scroll."""
-    result = subprocess.run(["adb", "shell", "wm", "size"], capture_output=True, text=True, timeout=5)
-    width, height = 1080, 1920  # defaults
-    if result.returncode == 0:
-        try:
-            size_str = result.stdout.strip().split()[-1]
-            width, height = map(int, size_str.split('x'))
-        except:
-            pass
-    
-    center_x = width // 2
-    start_y = int(height * 0.7)
-    end_y = int(height * 0.3)
-    subprocess.run(["adb", "shell", "input", "swipe", str(center_x), str(start_y), str(center_x), str(end_y), "500"], timeout=5)
-    time.sleep(2)
-
 def wait_for_email_and_download(driver, curp, download_dir):
     """Use uiautomator2 to interact with Outlook app directly via ADB."""
     logger.info("Connecting to device using uiautomator2...")
@@ -334,16 +171,145 @@ def wait_for_email_and_download(driver, curp, download_dir):
     d.app_wait(OUTLOOK_PACKAGE, timeout=10)
     time.sleep(5)
     
-    # Click email below the ad (ad ends around y=789, email should be below)
-    logger.info("Clicking email below ad...")
+    # Click filter button
+    logger.info("Clicking filter button...")
+    try:
+        # Try multiple ways to find filter button
+        filter_btn = None
+        
+        # Method 1: By description
+        filter_btn = d(description="Filter")
+        if not filter_btn.exists:
+            filter_btn = d(descriptionContains="Filter")
+        
+        if filter_btn.exists:
+            filter_btn.click()
+            logger.info("Clicked filter button")
+            time.sleep(2)
+        else:
+            # Fallback: Find Filter by parsing UI dump to get exact coordinates at Y=856
+            logger.info("Finding filter button coordinates from UI dump...")
+            xml_content = d.dump_hierarchy()
+            root = ET.fromstring(xml_content)
+            
+            for elem in root.iter():
+                content_desc = elem.get("content-desc", "").strip()
+                bounds = elem.get("bounds", "")
+                
+                if content_desc == "Filter" and bounds:
+                    match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds)
+                    if match:
+                        x1, y1, x2, y2 = map(int, match.groups())
+                        # Check if it's around Y=856
+                        if 850 <= y1 <= 870:
+                            center_x = (x1 + x2) // 2
+                            center_y = (y1 + y2) // 2
+                            logger.info(f"Found filter button at ({center_x}, {center_y})")
+                            d.click(center_x, center_y)
+                            time.sleep(2)
+                            break
+            else:
+                # Last resort: Click at right side, Y=856
+                width, height = d.window_size()
+                logger.info(f"Filter button not found, clicking at ({width - 50}, 856)")
+                d.click(width - 50, 856)
+                time.sleep(2)
+    except Exception as e:
+        logger.warning(f"Failed to click filter: {e}")
+    
+    # Click "Unread" option
+    logger.info("Clicking 'Unread' filter option...")
+    try:
+        # Try multiple ways to find Unread option
+        unread_option = None
+        
+        # Method 1: By text (with or without clickable)
+        unread_option = d(text="Unread")
+        if not unread_option.exists:
+            unread_option = d(textContains="Unread")
+        
+        if unread_option.exists:
+            unread_option.click()
+            logger.info("Clicked 'Unread' filter")
+            time.sleep(2)
+        else:
+            # Fallback: Find Unread by parsing UI dump to get exact coordinates at Y=621
+            logger.info("Finding 'Unread' option coordinates from UI dump...")
+            xml_content = d.dump_hierarchy()
+            root = ET.fromstring(xml_content)
+            
+            for elem in root.iter():
+                text = elem.get("text", "").strip()
+                bounds = elem.get("bounds", "")
+                class_name = elem.get("class", "")
+                
+                if text == "Unread" and "TextView" in class_name and bounds:
+                    match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds)
+                    if match:
+                        x1, y1, x2, y2 = map(int, match.groups())
+                        # Check if it's around Y=621
+                        if 610 <= y1 <= 630:
+                            center_x = (x1 + x2) // 2
+                            center_y = (y1 + y2) // 2
+                            logger.info(f"Found 'Unread' option at ({center_x}, {center_y})")
+                            d.click(center_x, center_y)
+                            time.sleep(2)
+                            break
+            else:
+                # Last resort: Click at center X, Y=621
+                width, height = d.window_size()
+                logger.info(f"'Unread' option not found, clicking at ({width // 2}, 621)")
+                d.click(width // 2, 621)
+                time.sleep(2)
+    except Exception as e:
+        logger.warning(f"Failed to click Unread: {e}")
+    
+    # Check if there are any emails (wait up to 1 minute for emails to arrive)
+    
+    def is_inbox_empty():
+        """Check if inbox is empty by looking for empty indicators."""
+        try:
+            xml_content = d.dump_hierarchy()
+            root = ET.fromstring(xml_content)
+            
+            empty_indicator_texts = ["No unread messages", "You're on top of everything here"]
+            
+            for elem in root.iter():
+                text = elem.get("text", "").strip()
+                if text:
+                    for indicator in empty_indicator_texts:
+                        if indicator.lower() in text.lower():
+                            return True
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking inbox: {e}")
+            return False  # Assume not empty if check fails
+    
+    # Wait up to 60 seconds for emails to arrive, checking every 5 seconds
+    wait_timeout = 60  # 1 minute
+    check_interval = 5  # Check every 5 seconds
+    elapsed_time = 0
+    
+    while elapsed_time < wait_timeout:
+        if not is_inbox_empty():
+            break
+        
+        time.sleep(check_interval)
+        elapsed_time += check_interval
+    else:
+        # Timeout reached
+        if is_inbox_empty():
+            logger.info("No unread emails available after waiting 60 seconds. The inbox is still empty.")
+            return None
+    
+    # Click the first email
+    logger.info("Clicking first email...")
     width, height = d.window_size()
-    
-    # Ad content-desc shows bounds [0,548][1080,789], so email is below y=800
-    # Click at middle x, around y=900 (below ad, above bottom nav)
+    # First email is typically around Y=550-600 after filter is applied
     click_x = width // 2
-    click_y = 900  # Below ad area, in email list area
+    click_y = 600  # First email position
     
-    logger.info(f"Clicking at ({click_x}, {click_y}) - below ad area")
+    logger.info(f"Clicking first email at ({click_x}, {click_y})")
     d.click(click_x, click_y)
     time.sleep(4)
     
@@ -497,7 +463,6 @@ def log_error(error_type, message, curp=None, nss=None):
 def main():
     """Main automation workflow."""
     driver = None
-    mobile_recording = None
     try:
  
         driver = setup_driver()
@@ -536,6 +501,10 @@ def main():
         
         # Driver is already closed inside wait_for_email_and_download
         driver = None
+        
+        if pdf_path is None:
+            logger.info("No emails found. Automation completed.")
+            return
         
         logger.info(f"[SUCCESS] PDF downloaded and renamed: {pdf_path}")
         logger.info("Automation completed successfully!")
