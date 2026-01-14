@@ -2,3 +2,5 @@ selenium>=4.0.0
 Appium-Python-Client>=3.0.0
 python-dotenv>=1.0.0
 uiautomator2>=2.16.0
+flask>=2.3.0
+pymongo>=4.5.0

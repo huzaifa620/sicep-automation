@@ -137,7 +137,13 @@ def submit_query(driver):
     logger.info("Query process initiated. Email will be sent shortly...")
 
 def wait_for_email_and_download(driver, curp, download_dir):
-    """Use uiautomator2 to interact with Outlook app directly via ADB."""
+    """
+    Use uiautomator2 to interact with Outlook app directly via ADB.
+    Returns: (condition, message, pdf_path)
+    - condition: 1=Success, 2=Subdelegación, 4=Error
+    - message: Response message
+    - pdf_path: Path to PDF if condition=1, None otherwise
+    """
     logger.info("Connecting to device using uiautomator2...")
     
     # Connect to device via ADB with retry on service already registered error
@@ -330,14 +336,14 @@ def wait_for_email_and_download(driver, curp, download_dir):
         # Timeout reached - check one final time
         if is_inbox_empty():
             logger.info("[TIMEOUT] No unread emails available after waiting 60 seconds. The inbox is still empty. Exiting.")
-            return None
+            return (4, "No unread emails available after waiting 60 seconds", None)
         else:
             logger.info("[OK] Emails found after timeout! Proceeding...")
     
     # Final safety check before clicking - DO NOT CLICK IF EMPTY
     if is_inbox_empty():
         logger.error("[ERROR] SAFETY CHECK FAILED: Inbox is still empty but code tried to proceed. Aborting.")
-        return None
+        return (4, "No unread emails available", None)
     
     # Find clickable emails in inbox
     width, height = d.window_size()
@@ -370,7 +376,7 @@ def wait_for_email_and_download(driver, curp, download_dir):
         
         if len(clickable_emails) == 0:
             logger.warning("No emails found to click")
-            return None
+            return (4, "No emails found in inbox", None)
         
         # Function to open email
         def open_email(email_info, email_num):
@@ -499,10 +505,24 @@ def wait_for_email_and_download(driver, curp, download_dir):
                     # Go back to inbox
                     d.press("back")
                     time.sleep(2)
-                    # If this was the last attempt, we're done
+                    # If this was the last attempt, check for subdelegación message
                     if attempt == max_attempts - 1:
-                        logger.error("No PDF found in any email after checking all")
-                        return None
+                        logger.warning("No PDF found in any email, checking for subdelegación message...")
+                        # Check email content for subdelegación message
+                        try:
+                            xml_content = d.dump_hierarchy()
+                            root = ET.fromstring(xml_content)
+                            subdelegacion_text = "Los datos registrados en el IMSS asociados a la CURP"
+                            for elem in root.iter():
+                                text = elem.get("text", "").strip()
+                                if subdelegacion_text in text:
+                                    full_message = text[:500]  # Get first 500 chars
+                                    logger.info("Found subdelegación message - Condition 2")
+                                    return (2, full_message, None)
+                        except:
+                            pass
+                        logger.error("No PDF found and no subdelegación message - Condition 4")
+                        return (4, "No PDF found in any email", None)
             except Exception as e:
                 logger.error(f"Error processing email #{attempt + 1}: {e}")
                 import traceback
@@ -516,15 +536,28 @@ def wait_for_email_and_download(driver, curp, download_dir):
                 # Continue to next attempt
                 continue
         else:
-            # If we exhausted all attempts without finding PDF
-            logger.error("No PDF found in any email after checking all")
-            return None
+            # If we exhausted all attempts without finding PDF, check for subdelegación
+            logger.warning("No PDF found, checking for subdelegación message...")
+            try:
+                xml_content = d.dump_hierarchy()
+                root = ET.fromstring(xml_content)
+                subdelegacion_text = "Los datos registrados en el IMSS asociados a la CURP"
+                for elem in root.iter():
+                    text = elem.get("text", "").strip()
+                    if subdelegacion_text in text:
+                        full_message = text[:500]
+                        logger.info("Found subdelegación message - Condition 2")
+                        return (2, full_message, None)
+            except:
+                pass
+            logger.error("No PDF found and no subdelegación message - Condition 4")
+            return (4, "No PDF found in any email", None)
             
     except Exception as e:
         logger.error(f"Error analyzing emails: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        return None
+        return (4, f"Error checking emails: {str(e)}", None)
     
     # PDF should already be clicked at this point, continue with save/download
     
@@ -567,6 +600,19 @@ def wait_for_email_and_download(driver, curp, download_dir):
                     pdf_files.append((filename, date_str))
     
     if not pdf_files:
+        # Check for subdelegación message before raising error
+        try:
+            xml_content = d.dump_hierarchy()
+            root = ET.fromstring(xml_content)
+            subdelegacion_text = "Los datos registrados en el IMSS asociados a la CURP"
+            for elem in root.iter():
+                text = elem.get("text", "").strip()
+                if subdelegacion_text in text:
+                    full_message = text[:500]
+                    logger.info("Found subdelegación message - Condition 2")
+                    return (2, full_message, None)
+        except:
+            pass
         raise Exception("Could not find downloaded PDF")
     
     # Sort by date (most recent first)
@@ -627,7 +673,43 @@ def wait_for_email_and_download(driver, curp, download_dir):
     
     logger.info(f"PDF renamed on device: {new_pdf_path} ({size} bytes)")
     
-    return new_pdf_path
+    # Success - Condition 1
+    return (1, "PDF received successfully", new_pdf_path)
+
+
+def get_nss_from_db(nbc_id):
+    """Get NSS from Nueva_Base_Central collection using nbc_id."""
+    try:
+        from pymongo import MongoClient
+        from bson import ObjectId
+        from dotenv import load_dotenv
+        import os
+        
+        load_dotenv(override=True)
+        mongo_uri = os.getenv("MONGO_URI", "")
+        
+        if not mongo_uri:
+            logger.warning("MONGO_URI not set, using fallback NSS from env")
+            return os.getenv("SISEC_NSS", "")
+        
+        client = MongoClient(mongo_uri)
+        collection = client["Main_User"]["Nueva_Base_Central"]
+        
+        doc = collection.find_one({"_id": ObjectId(nbc_id)})
+        client.close()
+        
+        if doc and "nss" in doc:
+            nss_obj = doc.get("nss", {})
+            if isinstance(nss_obj, dict) and "value" in nss_obj:
+                return nss_obj["value"]
+            elif isinstance(nss_obj, str):
+                return nss_obj
+        
+        logger.warning(f"NSS not found in database for nbc_id: {nbc_id}, using fallback")
+        return os.getenv("SISEC_NSS", "")
+    except Exception as e:
+        logger.warning(f"Error getting NSS from database: {e}, using fallback")
+        return os.getenv("SISEC_NSS", "")
 
 
 def log_error(error_type, message, curp=None, nss=None):
@@ -639,11 +721,30 @@ def log_error(error_type, message, curp=None, nss=None):
     logger.error(f"Error logged: {error_type} - {message}")
 
 
-def main():
-    """Main automation workflow."""
+def process_sisec_task(curp, device_id, taskid, queue_document_id, nbc_id):
+    """
+    Main function to process a SISEC task.
+    Called by API service to handle automation.
+    
+    Args:
+        curp: CURP to query
+        device_id: Device ID (for logging)
+        taskid: Task ID (for logging)
+        queue_document_id: Queue document ID (for logging)
+        nbc_id: NBC document ID (used to get NSS)
+    
+    Returns:
+        dict with keys: condition, message, status, pdf_path
+    """
     driver = None
     try:
- 
+        logger.info(f"Starting SISEC task - CURP: {curp}, TaskID: {taskid}")
+        
+        # Get NSS from database or use fallback
+        nss = get_nss_from_db(nbc_id)
+        if not nss:
+            raise Exception("NSS is required but not found in database or environment")
+        
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
@@ -668,38 +769,67 @@ def main():
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="dialog"][data-state="open"]')))
         
         logger.info("Filling form...")
-        fill_query_form(driver, CURP, NSS)
-        logger.info(f"[SUCCESS] Form filled - CURP: {CURP}, NSS: {NSS}")
+        fill_query_form(driver, curp, nss)
+        logger.info(f"[SUCCESS] Form filled - CURP: {curp}, NSS: {nss}")
         
         # Submit the query
-        # submit_query(driver)
+        submit_query(driver)
         
         # Wait for email and download PDF
         logger.info("Waiting for email and downloading PDF...")
-        pdf_path = wait_for_email_and_download(driver, CURP, DOWNLOAD_DIR)
+        condition, message, pdf_path = wait_for_email_and_download(driver, curp, DOWNLOAD_DIR)
         
         # Driver is already closed inside wait_for_email_and_download
         driver = None
         
-        if pdf_path is None:
-            logger.info("No emails found. Automation completed.")
-            return
-        
-        logger.info(f"[SUCCESS] PDF downloaded and renamed: {pdf_path}")
-        logger.info("Automation completed successfully!")
+        return {
+            'condition': condition,
+            'message': message,
+            'status': 'Complete',
+            'pdf_path': pdf_path
+        }
         
     except KeyboardInterrupt:
         logger.info("\n[INFO] Interrupted by user")
         if driver:
             driver.quit()
+        return {
+            'condition': 4,
+            'message': 'Process interrupted by user',
+            'status': 'Complete',
+            'pdf_path': None
+        }
     except Exception as e:
         error_msg = str(e)
         logger.error(f"\n[ERROR] {error_msg}")
-        log_error("AUTOMATION_ERROR", error_msg, CURP, NSS)
+        log_error("AUTOMATION_ERROR", error_msg, curp, None)
         import traceback
         traceback.print_exc()
         if driver:
             driver.quit()
+        return {
+            'condition': 4,
+            'message': f"Processing error: {error_msg}",
+            'status': 'Complete',
+            'pdf_path': None
+        }
+
+
+def main():
+    """Standalone test function - for testing automation without API."""
+    # For testing, use environment variables
+    curp = CURP
+    nbc_id = os.getenv("TEST_NBC_ID", "")
+    
+    result = process_sisec_task(
+        curp=curp,
+        device_id="test_device",
+        taskid=12345,
+        queue_document_id="test_queue",
+        nbc_id=nbc_id
+    )
+    
+    logger.info(f"Test completed - Condition: {result['condition']}, Message: {result['message']}")
 
 if __name__ == "__main__":
     main()
