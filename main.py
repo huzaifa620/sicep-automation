@@ -279,10 +279,12 @@ def wait_for_email_and_download(driver, curp, download_dir):
                 if text:
                     for indicator in empty_indicator_texts:
                         if indicator.lower() in text.lower():
+                            logger.info(f"[EMPTY] FOUND EMPTY INBOX INDICATOR: '{text}' - NO EMAILS AVAILABLE!")
                             return True
+            logger.info("[OK] No empty inbox indicators found - emails may be available")
             return False
         except Exception as e:
-            logger.debug(f"Error checking inbox: {e}")
+            logger.error(f"Error checking inbox: {e}")
             return False  # Assume not empty if check fails
     
     # Wait up to 60 seconds for emails to arrive, checking every 5 seconds
@@ -290,17 +292,35 @@ def wait_for_email_and_download(driver, curp, download_dir):
     check_interval = 5  # Check every 5 seconds
     elapsed_time = 0
     
+    # First check immediately
+    if is_inbox_empty():
+        logger.info("[EMPTY] INBOX IS EMPTY - 'No unread messages' detected. Waiting up to 60 seconds for emails to arrive...")
+    else:
+        logger.info("[OK] Emails found! Proceeding to click first email...")
+        # Emails are available, skip the wait loop
+        elapsed_time = wait_timeout  # Skip the loop
+    
     while elapsed_time < wait_timeout:
         if not is_inbox_empty():
+            logger.info("[OK] Emails found! Proceeding to click first email...")
             break
         
+        # Still empty, wait and check again
+        logger.info(f"[WAITING] Still waiting for emails... ({elapsed_time}/{wait_timeout} seconds elapsed)")
         time.sleep(check_interval)
         elapsed_time += check_interval
     else:
-        # Timeout reached
+        # Timeout reached - check one final time
         if is_inbox_empty():
-            logger.info("No unread emails available after waiting 60 seconds. The inbox is still empty.")
+            logger.info("[TIMEOUT] No unread emails available after waiting 60 seconds. The inbox is still empty. Exiting.")
             return None
+        else:
+            logger.info("[OK] Emails found after timeout! Proceeding...")
+    
+    # Final safety check before clicking - DO NOT CLICK IF EMPTY
+    if is_inbox_empty():
+        logger.error("[ERROR] SAFETY CHECK FAILED: Inbox is still empty but code tried to proceed. Aborting.")
+        return None
     
     # Click the first email
     logger.info("Clicking first email...")
