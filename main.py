@@ -42,7 +42,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_DIR / f"automation_{datetime.now().strftime('%Y%m%d')}.log"),
+        logging.FileHandler(LOG_DIR / f"automation_{datetime.now().strftime('%Y%m%d')}.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -126,20 +126,14 @@ def submit_query(driver):
     
     logger.info("Query submitted, waiting for process completion...")
     
-    # Wait for the dialog to close or for a success message
-    # The dialog should close when the process starts
     time.sleep(2)
     
-    # Wait for any loading indicators to disappear
     try:
-        # Wait for the dialog to close
         wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, 'div[role="dialog"][data-state="open"]')))
         logger.info("Query dialog closed, process initiated")
     except:
         logger.warning("Dialog may have already closed or different structure")
     
-    # Additional wait for the process to complete on the server side
-    # The actual email will be sent asynchronously
     logger.info("Query process initiated. Email will be sent shortly...")
 
 def wait_for_email_and_download(driver, curp, download_dir):
@@ -187,7 +181,6 @@ def wait_for_email_and_download(driver, curp, download_dir):
             logger.info("Clicked filter button")
             time.sleep(2)
         else:
-            # Fallback: Find Filter by parsing UI dump to get exact coordinates at Y=856
             logger.info("Finding filter button coordinates from UI dump...")
             xml_content = d.dump_hierarchy()
             root = ET.fromstring(xml_content)
@@ -256,11 +249,35 @@ def wait_for_email_and_download(driver, curp, download_dir):
                             time.sleep(2)
                             break
             else:
-                # Last resort: Click at center X, Y=621
-                width, height = d.window_size()
-                logger.info(f"'Unread' option not found, clicking at ({width // 2}, 621)")
-                d.click(width // 2, 621)
-                time.sleep(2)
+                # Last resort: Click filter button again to retry
+                logger.warning("'Unread' option not found, clicking filter button again to retry...")
+                try:
+                    filter_btn = d(description="Filter")
+                    if not filter_btn.exists:
+                        filter_btn = d(descriptionContains="Filter")
+                    
+                    if filter_btn.exists:
+                        filter_btn.click()
+                        logger.info("Clicked filter button again")
+                        time.sleep(2)
+                        # Try to find Unread again after reopening filter
+                        unread_option = d(text="Unread")
+                        if not unread_option.exists:
+                            unread_option = d(textContains="Unread")
+                        if unread_option.exists:
+                            unread_option.click()
+                            logger.info("Clicked 'Unread' filter after retry")
+                            time.sleep(2)
+                        else:
+                            logger.warning("Still could not find 'Unread' option after filter retry")
+                    else:
+                        # Fallback: try clicking filter by coordinates
+                        width, height = d.window_size()
+                        logger.info(f"Filter button not found, clicking at ({width - 50}, 856)")
+                        d.click(width - 50, 856)
+                        time.sleep(2)
+                except Exception as retry_error:
+                    logger.error(f"Failed to retry filter click: {retry_error}")
     except Exception as e:
         logger.warning(f"Failed to click Unread: {e}")
     
@@ -322,52 +339,194 @@ def wait_for_email_and_download(driver, curp, download_dir):
         logger.error("[ERROR] SAFETY CHECK FAILED: Inbox is still empty but code tried to proceed. Aborting.")
         return None
     
-    # Click the first email
-    logger.info("Clicking first email...")
+    # Find clickable emails in inbox
     width, height = d.window_size()
-    # First email is typically around Y=550-600 after filter is applied
-    click_x = width // 2
-    click_y = 600  # First email position
     
-    logger.info(f"Clicking first email at ({click_x}, {click_y})")
-    d.click(click_x, click_y)
-    time.sleep(4)
-    
-    # Click PDF attachment button
-    logger.info("Clicking PDF attachment...")
-    time.sleep(3)  # Wait for email to fully load
-    
-    pdf_button = None
-    
-    # Try multiple strategies to find PDF button
     try:
-        pdf_button = d(descriptionContains="Constancia de Semanas Cotizadas del Asegurado.pdf", clickable=True)
-        if pdf_button.exists:
-            logger.info("Found PDF button by full filename")
-    except:
-        pass
+        xml_content = d.dump_hierarchy()
+        root = ET.fromstring(xml_content)
+        
+        # Find all clickable email elements in the email list area (typically Y between 400-1200)
+        clickable_emails = []
+        for elem in root.iter():
+            bounds = elem.get("bounds", "")
+            clickable = elem.get("clickable", "false")
+            if bounds and clickable == "true":
+                match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds)
+                if match:
+                    x1, y1, x2, y2 = map(int, match.groups())
+                    # Check if it's in the email list area (Y between 400-1200, reasonable width)
+                    if 400 <= y1 <= 1200 and x1 >= 0 and x2 <= width and (x2 - x1) > 200:
+                        clickable_emails.append({
+                            'element': elem,
+                            'bounds': (x1, y1, x2, y2),
+                            'center_y': (y1 + y2) // 2
+                        })
+        
+        # Sort by Y position (top to bottom)
+        clickable_emails.sort(key=lambda x: x['center_y'])
+        
+        logger.info(f"Found {len(clickable_emails)} unread email(s) in inbox")
+        
+        if len(clickable_emails) == 0:
+            logger.warning("No emails found to click")
+            return None
+        
+        # Function to open email
+        def open_email(email_info, email_num):
+            x1, y1, x2, y2 = email_info['bounds']
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+            
+            logger.info(f"Opening email #{email_num}...")
+            
+            # Click the email
+            d.click(center_x, center_y)
+            time.sleep(4)  # Wait for email to open
+        
+        # Function to try finding PDF in current email
+        def try_find_pdf():
+            time.sleep(3)  # Wait for email to fully load
+            
+            pdf_button = None
+            
+            # Try multiple strategies to find PDF button
+            try:
+                pdf_button = d(text="Constancia de Semanas Cotizadas del Asegurado.pdf", clickable=True)
+                if pdf_button.exists:
+                    return pdf_button
+            except:
+                pass
+            
+            if not pdf_button or not pdf_button.exists:
+                try:
+                    pdf_button = d(textContains="Constancia de Semanas Cotizadas del Asegurado.pdf", clickable=True)
+                    if pdf_button.exists:
+                        return pdf_button
+                except:
+                    pass
+            
+            if not pdf_button or not pdf_button.exists:
+                try:
+                    pdf_button = d(descriptionContains="Constancia de Semanas Cotizadas del Asegurado.pdf", clickable=True)
+                    if pdf_button.exists:
+                        return pdf_button
+                except:
+                    pass
+            
+            if not pdf_button or not pdf_button.exists:
+                try:
+                    pdf_button = d(descriptionContains="File Type PDF", clickable=True)
+                    if pdf_button.exists:
+                        return pdf_button
+                except:
+                    pass
+            
+            if not pdf_button or not pdf_button.exists:
+                try:
+                    pdf_button = d(descriptionContains=".pdf", clickable=True)
+                    if pdf_button.exists:
+                        return pdf_button
+                except:
+                    pass
+            
+            if not pdf_button or not pdf_button.exists:
+                try:
+                    pdf_button = d(textContains=".pdf", clickable=True)
+                    if pdf_button.exists:
+                        return pdf_button
+                except:
+                    pass
+            
+            return None
+        
+        # Try emails - always click first email after going back (since list shifts)
+        max_attempts = len(clickable_emails)
+        for attempt in range(max_attempts):
+            try:
+                # Always get the first email from the list (index 0)
+                # After going back, the next email becomes the first one
+                
+                # Get current UI to find first email
+                xml_content = d.dump_hierarchy()
+                root = ET.fromstring(xml_content)
+                
+                # Find first clickable email element in the list
+                first_email = None
+                first_email_bounds = None
+                
+                clickable_emails_current = []
+                for elem in root.iter():
+                    bounds = elem.get("bounds", "")
+                    clickable = elem.get("clickable", "false")
+                    if bounds and clickable == "true":
+                        match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds)
+                        if match:
+                            x1, y1, x2, y2 = map(int, match.groups())
+                            # Check if it's in the email list area (Y between 400-1200, reasonable width)
+                            if 400 <= y1 <= 1200 and x1 >= 0 and x2 <= width and (x2 - x1) > 200:
+                                clickable_emails_current.append({
+                                    'element': elem,
+                                    'bounds': (x1, y1, x2, y2),
+                                    'center_y': (y1 + y2) // 2
+                                })
+                
+                if not clickable_emails_current:
+                    logger.warning("No clickable emails found in current view")
+                    break
+                
+                # Sort by Y position and get the first one
+                clickable_emails_current.sort(key=lambda x: x['center_y'])
+                first_email = clickable_emails_current[0]
+                x1, y1, x2, y2 = first_email['bounds']
+                center_x = (x1 + x2) // 2
+                center_y = (y1 + y2) // 2
+                
+                # Open email and log contents
+                open_email(first_email, attempt + 1)
+                
+                # Try to find PDF
+                pdf_button = try_find_pdf()
+                
+                if pdf_button and pdf_button.exists:
+                    logger.info("PDF found! Clicking PDF attachment...")
+                    pdf_button.click()
+                    time.sleep(2)
+                    # Break out of loop and continue with PDF download
+                    break
+                else:
+                    logger.info(f"No PDF in email #{attempt + 1}, trying next...")
+                    # Go back to inbox
+                    d.press("back")
+                    time.sleep(2)
+                    # If this was the last attempt, we're done
+                    if attempt == max_attempts - 1:
+                        logger.error("No PDF found in any email after checking all")
+                        return None
+            except Exception as e:
+                logger.error(f"Error processing email #{attempt + 1}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                # Try to go back
+                try:
+                    d.press("back")
+                    time.sleep(2)
+                except:
+                    pass
+                # Continue to next attempt
+                continue
+        else:
+            # If we exhausted all attempts without finding PDF
+            logger.error("No PDF found in any email after checking all")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error analyzing emails: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
     
-    if not pdf_button or not pdf_button.exists:
-        try:
-            pdf_button = d(descriptionContains="File Type PDF", clickable=True)
-            if pdf_button.exists:
-                logger.info("Found PDF button by 'File Type PDF'")
-        except:
-            pass
-    
-    if not pdf_button or not pdf_button.exists:
-        try:
-            pdf_button = d(descriptionContains=".pdf", clickable=True)
-            if pdf_button.exists:
-                logger.info("Found PDF button by '.pdf'")
-        except:
-            pass
-    
-    if pdf_button and pdf_button.exists:
-        pdf_button.click()
-        time.sleep(2)
-    else:
-        raise Exception("Could not find PDF attachment button")
+    # PDF should already be clicked at this point, continue with save/download
     
     # Click "Save to device" in action sheet
     logger.info("Saving PDF to device...")
@@ -513,7 +672,7 @@ def main():
         logger.info(f"[SUCCESS] Form filled - CURP: {CURP}, NSS: {NSS}")
         
         # Submit the query
-        submit_query(driver)
+        # submit_query(driver)
         
         # Wait for email and download PDF
         logger.info("Waiting for email and downloading PDF...")
