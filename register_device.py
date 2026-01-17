@@ -1,8 +1,3 @@
-"""
-Manual Device Registration Script
-Register a new device in the dev_devices collection
-"""
-
 import sys
 import subprocess
 import os

@@ -1,8 +1,3 @@
-"""
-MongoDB Database Operations
-Handles all database updates for Registro_works, Nueva_Base_Central, and device management
-"""
-
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 from bson import ObjectId

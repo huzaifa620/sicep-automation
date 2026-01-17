@@ -1,8 +1,3 @@
-"""
-SISEC Scraper API Service
-Main API endpoint for receiving requests from G_IMSS orchestrator
-"""
-
 from flask import Flask, request, jsonify
 from threading import Thread
 import logging

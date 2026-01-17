@@ -2,6 +2,7 @@ from appium import webdriver
 from appium.options.android import UiAutomator2Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
 import os
 import time
@@ -117,24 +118,524 @@ def submit_query(driver):
     """Click the 'consultar' button and wait for process completion."""
     wait = WebDriverWait(driver, TIMEOUT)
     
+    logger.info("[STEP] Finding 'Consultar' button in dialog...")
     # Find and click the consultar button - use type="submit" for efficiency
     consultar_button = wait.until(
         EC.element_to_be_clickable((By.CSS_SELECTOR, 'div[role="dialog"] button[type="submit"]'))
     )
+    logger.info("[STEP] Found 'Consultar' button, clicking...")
     if not safe_click(driver, consultar_button):
         raise Exception("Failed to click 'Consultar' button")
     
-    logger.info("Query submitted, waiting for process completion...")
+    logger.info("[STEP] Query submitted, waiting for dialog to close...")
+    time.sleep(3)
     
-    time.sleep(2)
-    
+    # Wait for dialog to close - try multiple ways
+    dialog_closed = False
     try:
         wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, 'div[role="dialog"][data-state="open"]')))
-        logger.info("Query dialog closed, process initiated")
+        logger.info("[SUCCESS] Dialog closed automatically")
+        dialog_closed = True
     except:
-        logger.warning("Dialog may have already closed or different structure")
+        logger.warning("[INFO] Dialog did not close automatically, checking if still open...")
     
-    logger.info("Query process initiated. Email will be sent shortly...")
+    # If dialog is still open, close it explicitly
+    if not dialog_closed:
+        try:
+            logger.info("[STEP] Checking if dialog is still open...")
+            dialog = driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"][data-state="open"]')
+            logger.info(f"[DEBUG] Found {len(dialog)} dialogs with data-state='open'")
+            
+            # Also check for any dialog regardless of state
+            all_dialogs = driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"]')
+            logger.info(f"[DEBUG] Found {len(all_dialogs)} total dialogs")
+            
+            for idx, d in enumerate(all_dialogs):
+                try:
+                    data_state = d.get_attribute("data-state")
+                    logger.info(f"[DEBUG] Dialog {idx}: data-state='{data_state}'")
+                except:
+                    pass
+            
+            if dialog or all_dialogs:
+                logger.info("[STEP] Dialog still open, attempting to close it...")
+                
+                # Try clicking close button - multiple selectors
+                close_selectors = [
+                    ('css', 'div[role="dialog"] button[data-slot="dialog-close"]'),
+                    ('xpath', '//div[@role="dialog"]//button[@data-slot="dialog-close"]'),
+                    ('xpath', '//div[@role="dialog"]//button[.//svg[contains(@class, "lucide-x")]]'),
+                    ('css', 'div[role="dialog"] button:has(svg.lucide-x)'),
+                ]
+                
+                close_btn = None
+                for selector_type, selector in close_selectors:
+                    try:
+                        if selector_type == 'xpath':
+                            elements = driver.find_elements(By.XPATH, selector)
+                        else:
+                            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                        logger.info(f"[DEBUG] Close button selector '{selector}': found {len(elements)} elements")
+                        if elements:
+                            close_btn = elements[0]
+                            logger.info(f"[SUCCESS] Found close button using selector: {selector}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"[DEBUG] Error with selector {selector}: {e}")
+                
+                if close_btn:
+                    logger.info("[STEP] Found close button, clicking...")
+                    if safe_click(driver, close_btn):
+                        time.sleep(2)
+                        logger.info("[SUCCESS] Dialog closed via close button")
+                        dialog_closed = True
+                    else:
+                        logger.warning("[WARNING] Failed to click close button")
+                else:
+                    logger.warning("[WARNING] Close button not found with any selector")
+                    
+                # If still open, try clicking Cancel button
+                if not dialog_closed:
+                    logger.info("[STEP] Trying Cancel button...")
+                    cancel_selectors = [
+                        ('xpath', "//div[@role='dialog']//button[contains(text(), 'Cancelar')]"),
+                        ('xpath', "//div[@role='dialog']//button[.//text()[contains(., 'Cancelar')]]"),
+                        ('css', 'div[role="dialog"] button:contains("Cancelar")'),
+                    ]
+                    
+                    cancel_btn = None
+                    for selector_type, selector in cancel_selectors:
+                        try:
+                            if selector_type == 'xpath':
+                                elements = driver.find_elements(By.XPATH, selector)
+                            else:
+                                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                            logger.info(f"[DEBUG] Cancel button selector '{selector}': found {len(elements)} elements")
+                            if elements:
+                                cancel_btn = elements[0]
+                                logger.info(f"[SUCCESS] Found Cancel button using selector: {selector}")
+                                break
+                        except Exception as e:
+                            logger.debug(f"[DEBUG] Error with selector {selector}: {e}")
+                    
+                    if cancel_btn:
+                        logger.info("[STEP] Found Cancel button, clicking...")
+                        if safe_click(driver, cancel_btn):
+                            time.sleep(2)
+                            logger.info("[SUCCESS] Dialog closed via Cancel button")
+                            dialog_closed = True
+                    else:
+                        logger.warning("[WARNING] Cancel button not found")
+        except Exception as e:
+            logger.warning(f"[WARNING] Error closing dialog: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+    
+    if not dialog_closed:
+        logger.warning("[WARNING] Dialog may still be open, but proceeding anyway...")
+    
+    logger.info("[INFO] Query process initiated, checking for direct download option...")
+
+
+def try_direct_download(driver, curp, download_dir):
+    """
+    Try to download PDF directly from the page after query submission.
+    Finds table row with CURP, clicks dropdown menu, and downloads PDF.
+    Returns: (success, pdf_path) or (False, None) if not available.
+    """
+    try:
+        logger.info("[DIRECT_DOWNLOAD] Starting direct download attempt...")
+        
+        # Wait for page to update after query submission
+        logger.info("[DIRECT_DOWNLOAD] Waiting 5 seconds for page to update...")
+        time.sleep(5)
+        
+        # Find table row with our CURP - check current rows and rows below
+        logger.info(f"[DIRECT_DOWNLOAD] Looking for table row with CURP: {curp}")
+        curp_row = None
+        
+        # First try to find row with exact CURP match
+        try:
+            logger.info("[DIRECT_DOWNLOAD] Searching all table rows...")
+            rows = driver.find_elements(By.XPATH, "//tr")
+            logger.info(f"[DIRECT_DOWNLOAD] Found {len(rows)} table rows")
+            
+            for idx, row in enumerate(rows):
+                try:
+                    row_text = row.text
+                    logger.debug(f"[DIRECT_DOWNLOAD] Row {idx} text: {row_text[:100]}...")
+                    if curp in row_text:
+                        logger.info(f"[SUCCESS] Found table row {idx} with CURP: {curp}")
+                        curp_row = row
+                        break
+                except:
+                    continue
+        except Exception as e:
+            logger.warning(f"[DIRECT_DOWNLOAD] Error finding rows: {e}")
+        
+        if not curp_row:
+            logger.warning(f"[DIRECT_DOWNLOAD] Table row with CURP {curp} not found - scrolling down to check below rows...")
+            # If not found, scroll down and check more rows
+            try:
+                driver.execute_script("window.scrollBy(0, 500);")
+                time.sleep(2)
+                rows = driver.find_elements(By.XPATH, "//tr")
+                logger.info(f"[DIRECT_DOWNLOAD] After scroll, found {len(rows)} table rows")
+                for idx, row in enumerate(rows):
+                    try:
+                        row_text = row.text
+                        if curp in row_text:
+                            logger.info(f"[SUCCESS] Found table row {idx} with CURP (after scroll): {curp}")
+                            curp_row = row
+                            break
+                    except:
+                        continue
+            except Exception as e:
+                logger.warning(f"[DIRECT_DOWNLOAD] Error checking below rows: {e}")
+        
+        if not curp_row:
+            logger.warning(f"[DIRECT_DOWNLOAD] Table row with CURP {curp} not found anywhere")
+            return (False, None)
+        
+        # Found the row, now find dropdown button
+        try:
+            logger.info("[DIRECT_DOWNLOAD] Found row with CURP, looking for dropdown menu button...")
+            
+            # Find the dropdown menu button with data-slot="dropdown-menu-trigger" in this row
+            dropdown_btn = curp_row.find_elements(By.XPATH, ".//button[@data-slot='dropdown-menu-trigger']")
+            logger.info(f"[DEBUG] Found {len(dropdown_btn)} dropdown buttons with data-slot='dropdown-menu-trigger'")
+            
+            # Also try finding by ID pattern (Radix UI dynamic IDs like radix-_r_2k_)
+            if not dropdown_btn:
+                logger.info("[DEBUG] Trying to find button by ID pattern (radix-*)...")
+                # Find all buttons with IDs starting with 'radix-'
+                all_radix_buttons = curp_row.find_elements(By.XPATH, ".//button[starts-with(@id, 'radix-')]")
+                logger.info(f"[DEBUG] Found {len(all_radix_buttons)} buttons with radix- IDs")
+                for idx, btn in enumerate(all_radix_buttons):
+                    btn_id = btn.get_attribute("id")
+                    data_slot = btn.get_attribute("data-slot")
+                    logger.info(f"[DEBUG]   Radix button {idx}: id='{btn_id}', data-slot='{data_slot}'")
+                    if data_slot == 'dropdown-menu-trigger':
+                        dropdown_btn = [btn]
+                        logger.info(f"[SUCCESS] Found dropdown button by radix ID: {btn_id}")
+                        break
+            
+            # Try specific ID if provided (radix-_r_2k_ or similar)
+            if not dropdown_btn:
+                logger.info("[DEBUG] Trying to find button by ID pattern matching 'radix-_r_*'...")
+                all_radix_r_buttons = curp_row.find_elements(By.XPATH, ".//button[matches(@id, 'radix-_r_.*')] | .//button[starts-with(@id, 'radix-_r_')]")
+                if not all_radix_r_buttons:
+                    # Try XPath with contains for id
+                    all_radix_r_buttons = driver.find_elements(By.XPATH, "//button[contains(@id, 'radix-') and @data-slot='dropdown-menu-trigger']")
+                logger.info(f"[DEBUG] Found {len(all_radix_r_buttons)} buttons with radix-_r_* pattern")
+                if all_radix_r_buttons:
+                    # Use the one in our row or first one found
+                    for btn in all_radix_r_buttons:
+                        try:
+                            if btn in curp_row.find_elements(By.XPATH, ".//*"):
+                                dropdown_btn = [btn]
+                                logger.info(f"[SUCCESS] Found dropdown button in row with radix ID: {btn.get_attribute('id')}")
+                                break
+                        except:
+                            pass
+                    if not dropdown_btn and all_radix_r_buttons:
+                        dropdown_btn = [all_radix_r_buttons[0]]
+                        logger.info(f"[INFO] Using first radix button found: {all_radix_r_buttons[0].get_attribute('id')}")
+            
+            # Also try CSS selector
+            if not dropdown_btn:
+                logger.info("[DEBUG] Trying CSS selector for dropdown button...")
+                dropdown_btn = curp_row.find_elements(By.CSS_SELECTOR, "button[data-slot='dropdown-menu-trigger']")
+                logger.info(f"[DEBUG] CSS selector found {len(dropdown_btn)} buttons")
+            
+            # Also try searching in entire document
+            if not dropdown_btn:
+                logger.info("[DEBUG] Searching entire document for dropdown button...")
+                all_dropdowns = driver.find_elements(By.XPATH, "//button[@data-slot='dropdown-menu-trigger']")
+                logger.info(f"[DEBUG] Found {len(all_dropdowns)} dropdown buttons in entire document")
+                
+                # Try to find one that's near our row (same table)
+                if all_dropdowns:
+                    row_parent = curp_row.find_element(By.XPATH, "./..")
+                    table = row_parent if row_parent.tag_name == 'tbody' else row_parent.find_element(By.XPATH, "./..")
+                    for btn in all_dropdowns:
+                        try:
+                            # Check if button is in same table/context
+                            btn_parent = btn.find_element(By.XPATH, "./../..")
+                            if table in btn_parent.get_property('all_parents') or True:  # Just try the first one for now
+                                dropdown_btn = [btn]
+                                logger.info("[SUCCESS] Found dropdown button in same table context")
+                                break
+                        except:
+                            # Just use first one
+                            dropdown_btn = [all_dropdowns[0]]
+                            logger.info("[INFO] Using first dropdown button found")
+                            break
+            
+            if not dropdown_btn:
+                # Fallback: look for button with ellipsis-vertical icon in this row
+                logger.info("[DEBUG] Trying fallback selector - button with ellipsis-vertical icon...")
+                dropdown_btn = curp_row.find_elements(By.XPATH, ".//button[.//svg[contains(@class, 'ellipsis-vertical')]]")
+                logger.info(f"[DEBUG] Found {len(dropdown_btn)} dropdown buttons with ellipsis-vertical icon")
+                
+                # Also try in entire document
+                if not dropdown_btn:
+                    all_ellipsis = driver.find_elements(By.XPATH, "//button[.//svg[contains(@class, 'ellipsis-vertical')]]")
+                    logger.info(f"[DEBUG] Found {len(all_ellipsis)} ellipsis buttons in entire document")
+                    if all_ellipsis:
+                        dropdown_btn = [all_ellipsis[0]]
+                        logger.info("[INFO] Using first ellipsis button found")
+            
+            if dropdown_btn:
+                btn = dropdown_btn[0]
+                btn_id = btn.get_attribute("id")
+                logger.info(f"[DIRECT_DOWNLOAD] Found dropdown button with ID: {btn_id}")
+                
+                # FIRST: Scroll button into view - this is critical
+                logger.info("[DIRECT_DOWNLOAD] Scrolling dropdown button into view...")
+                try:
+                    # Scroll the button into view (center it)
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", btn)
+                    logger.info("[DIRECT_DOWNLOAD] Scrolled button into view")
+                    
+                    # Wait a bit for scroll to complete and button to be ready
+                    time.sleep(1)
+                    
+                    # Re-find the button after scrolling - try by ID first
+                    logger.info(f"[DIRECT_DOWNLOAD] Re-finding button after scroll by ID: {btn_id}...")
+                    if btn_id:
+                        try:
+                            btn_by_id = driver.find_element(By.ID, btn_id)
+                            btn = btn_by_id
+                            logger.info(f"[DIRECT_DOWNLOAD] Button re-found by ID after scroll")
+                        except:
+                            logger.warning(f"[WARNING] Could not re-find button by ID {btn_id}, trying data-slot...")
+                            dropdown_btn_after_scroll = curp_row.find_elements(By.XPATH, ".//button[@data-slot='dropdown-menu-trigger']")
+                            if dropdown_btn_after_scroll:
+                                btn = dropdown_btn_after_scroll[0]
+                                logger.info("[DIRECT_DOWNLOAD] Button re-found by data-slot after scroll")
+                            else:
+                                logger.warning("[WARNING] Could not re-find button after scroll, using original")
+                    else:
+                        dropdown_btn_after_scroll = curp_row.find_elements(By.XPATH, ".//button[@data-slot='dropdown-menu-trigger']")
+                        if dropdown_btn_after_scroll:
+                            btn = dropdown_btn_after_scroll[0]
+                            logger.info("[DIRECT_DOWNLOAD] Button re-found by data-slot after scroll")
+                    
+                    # Wait max 2 seconds for button to be ready
+                    time.sleep(2)
+                    logger.info("[DIRECT_DOWNLOAD] Waited 2 seconds, button should be ready")
+                    
+                except Exception as e:
+                    logger.warning(f"[WARNING] Error scrolling button into view: {e}")
+                
+                # Click the dropdown button - try up to 2 times with different methods
+                menu_opened = False
+                for attempt in range(2):
+                    try:
+                        if attempt == 0:
+                            # First attempt: JavaScript touch events
+                            logger.info("[DIRECT_DOWNLOAD] Clicking dropdown menu button (touch events)...")
+                            driver.execute_script(f"""
+                                var btn = document.getElementById('{btn_id}');
+                                if (btn) {{
+                                    var touchStart = new TouchEvent('touchstart', {{
+                                        bubbles: true,
+                                        cancelable: true,
+                                        view: window,
+                                        touches: [new Touch({{
+                                            identifier: 0,
+                                            target: btn,
+                                            clientX: btn.offsetLeft + btn.offsetWidth/2,
+                                            clientY: btn.offsetTop + btn.offsetHeight/2,
+                                            radiusX: 2.5,
+                                            radiusY: 2.5,
+                                            rotationAngle: 10,
+                                            force: 0.5
+                                        }})]
+                                    }});
+                                    var touchEnd = new TouchEvent('touchend', {{
+                                        bubbles: true,
+                                        cancelable: true,
+                                        view: window,
+                                        changedTouches: [new Touch({{
+                                            identifier: 0,
+                                            target: btn,
+                                            clientX: btn.offsetLeft + btn.offsetWidth/2,
+                                            clientY: btn.offsetTop + btn.offsetHeight/2,
+                                            radiusX: 2.5,
+                                            radiusY: 2.5,
+                                            rotationAngle: 10,
+                                            force: 0.5
+                                        }})]
+                                    }});
+                                    btn.dispatchEvent(touchStart);
+                                    setTimeout(function() {{
+                                        btn.dispatchEvent(touchEnd);
+                                        btn.click();
+                                    }}, 50);
+                                }}
+                            """)
+                        else:
+                            # Second attempt: JavaScript with multiple events
+                            logger.info("[DIRECT_DOWNLOAD] Retrying click (multiple events)...")
+                            driver.execute_script("""
+                                var btn = arguments[0];
+                                btn.focus();
+                                var events = ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'];
+                                events.forEach(function(eventType) {
+                                    var evt = new MouseEvent(eventType, {
+                                        bubbles: true,
+                                        cancelable: true,
+                                        view: window
+                                    });
+                                    btn.dispatchEvent(evt);
+                                });
+                                btn.click();
+                            """, btn)
+                        
+                        logger.info("[DIRECT_DOWNLOAD] Clicked, waiting 2 seconds for menu...")
+                        time.sleep(2)
+                        
+                        # Check if menu opened
+                        menu_selectors = [
+                            ("//div[@role='menu' and @data-state='open']", "menu with data-state='open'"),
+                            ("//div[@role='menu']", "menu"),
+                            ("//div[@data-slot='dropdown-menu-content']", "dropdown-menu-content"),
+                        ]
+                        
+                        for selector, desc in menu_selectors:
+                            try:
+                                all_menus = driver.find_elements(By.XPATH, selector)
+                                if all_menus:
+                                    logger.info(f"[SUCCESS] Dropdown menu opened (found {len(all_menus)} {desc})")
+                                    menu_opened = True
+                                    break
+                            except:
+                                continue
+                        
+                        if menu_opened:
+                            break
+                    except Exception as e:
+                        logger.warning(f"[WARNING] Click attempt {attempt + 1} failed: {e}")
+                
+                if not menu_opened:
+                    logger.warning("[WARNING] Dropdown menu did not open after all attempts")
+                    return (False, None)
+                
+                # Menu opened successfully, now look for "Descargar PDF" option
+                logger.info("[DIRECT_DOWNLOAD] Menu opened, looking for 'Descargar PDF' option...")
+                
+                # Try multiple selectors
+                menu_selectors = [
+                    "//div[@role='menu' and @data-state='open']//div[@role='menuitem' and contains(text(), 'Descargar PDF')]",
+                    "//div[@role='menu']//div[@role='menuitem' and contains(text(), 'Descargar PDF')]",
+                    "//*[@role='menuitem' and contains(text(), 'Descargar PDF')]",
+                    "//div[contains(text(), 'Descargar PDF')]",
+                ]
+                
+                descargar_options = []
+                for selector in menu_selectors:
+                    try:
+                        options = driver.find_elements(By.XPATH, selector)
+                        if options:
+                            descargar_options = options
+                            logger.info(f"[SUCCESS] Found 'Descargar PDF' option")
+                            break
+                    except:
+                        continue
+                
+                if descargar_options:
+                    logger.info("[DIRECT_DOWNLOAD] Found 'Descargar PDF' option, clicking...")
+                    if safe_click(driver, descargar_options[0]):
+                        logger.info("[DIRECT_DOWNLOAD] Clicked 'Descargar PDF', waiting 5 seconds for download to start...")
+                        time.sleep(5)
+                        
+                        # Check if PDF was downloaded
+                        download_path = "/sdcard/Download"
+                        logger.info(f"[DIRECT_DOWNLOAD] Checking Downloads folder: {download_path}")
+                        list_result = subprocess.run(
+                            ["adb", "shell", "ls", "-lt", download_path],
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+                        
+                        if list_result.returncode == 0:
+                            logger.info("[DIRECT_DOWNLOAD] Successfully listed Downloads folder")
+                            pdf_files = []
+                            for line in list_result.stdout.split("\n"):
+                                if ".pdf" in line and line.strip().startswith("-"):
+                                    parts = line.split()
+                                    if len(parts) >= 8:
+                                        filename = " ".join(parts[7:])
+                                        if filename.endswith(".pdf"):
+                                            date_str = " ".join(parts[5:7])
+                                            pdf_files.append((filename, date_str))
+                                            logger.info(f"[DIRECT_DOWNLOAD] Found PDF file: {filename}")
+                            
+                            if pdf_files:
+                                logger.info(f"[DIRECT_DOWNLOAD] Found {len(pdf_files)} PDF file(s), getting most recent...")
+                                def parse_date(date_str):
+                                    try:
+                                        if "-" in date_str.split()[0]:
+                                            return datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+                                        else:
+                                            current_year = datetime.now().year
+                                            return datetime.strptime(f"{current_year} {date_str}", "%Y %b %d %H:%M")
+                                    except:
+                                        return datetime.now()
+                                
+                                pdf_files.sort(key=lambda x: parse_date(x[1]), reverse=True)
+                                pdf_path = f"{download_path}/{pdf_files[0][0]}"
+                                logger.info(f"[DIRECT_DOWNLOAD] Most recent PDF: {pdf_files[0][0]}")
+                                
+                                # Rename PDF on device to just CURP.pdf
+                                filename = f"{curp}.pdf"
+                                device_dir = "/".join(pdf_path.split("/")[:-1])
+                                new_pdf_path = f"{device_dir}/{filename}"
+                                
+                                logger.info(f"[DIRECT_DOWNLOAD] Renaming PDF from {pdf_files[0][0]} to {filename}...")
+                                mv_cmd = f'adb shell "mv \'{pdf_path}\' \'{new_pdf_path}\'"'
+                                result = subprocess.run(
+                                    mv_cmd,
+                                    shell=True,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10
+                                )
+                                
+                                if result.returncode == 0:
+                                    logger.info(f"[SUCCESS] PDF downloaded directly from page: {new_pdf_path}")
+                                    return (True, new_pdf_path)
+                                else:
+                                    logger.warning(f"[WARNING] Failed to rename PDF: {result.stderr}")
+                                    logger.info(f"[INFO] Using original path: {pdf_path}")
+                                    return (True, pdf_path)
+                            else:
+                                logger.warning("[DIRECT_DOWNLOAD] No PDF files found in Downloads folder")
+                        else:
+                            logger.warning(f"[DIRECT_DOWNLOAD] Could not check Downloads folder: {list_result.stderr}")
+                    else:
+                        logger.warning("[DIRECT_DOWNLOAD] Failed to click 'Descargar PDF' option")
+                else:
+                    logger.warning("[DIRECT_DOWNLOAD] 'Descargar PDF' option not found in dropdown menu")
+                    return (False, None)
+            else:
+                logger.warning("[DIRECT_DOWNLOAD] Dropdown menu button not found in row")
+        except Exception as e:
+            logger.warning(f"[DIRECT_DOWNLOAD] Error interacting with row: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+        
+        logger.info("[DIRECT_DOWNLOAD] Direct download failed, will fallback to email method")
+        return (False, None)
+        
+    except Exception as e:
+        logger.warning(f"[DIRECT_DOWNLOAD] Error in try_direct_download: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return (False, None)
 
 def wait_for_email_and_download(driver, curp, download_dir):
     """
@@ -775,8 +1276,22 @@ def process_sisec_task(curp, device_id, taskid, queue_document_id, nbc_id):
         # Submit the query
         submit_query(driver)
         
-        # Wait for email and download PDF
-        logger.info("Waiting for email and downloading PDF...")
+        # First, try direct download from the page
+        logger.info("[MAIN] Attempting direct download from page...")
+        direct_success, pdf_path = try_direct_download(driver, curp, DOWNLOAD_DIR)
+        
+        if direct_success and pdf_path:
+            logger.info("[SUCCESS] PDF downloaded directly from page - Condition 1")
+            driver.quit()
+            return {
+                'condition': 1,
+                'message': 'PDF downloaded directly from page',
+                'status': 'Complete',
+                'pdf_path': pdf_path
+            }
+        
+        # If direct download failed, fallback to email method
+        logger.info("[MAIN] Direct download not available, falling back to email method...")
         condition, message, pdf_path = wait_for_email_and_download(driver, curp, DOWNLOAD_DIR)
         
         # Driver is already closed inside wait_for_email_and_download
