@@ -157,14 +157,14 @@ def update_rw(curp, condition, message, status, queue_document_id=None):
 
 
 def mark_device_busy(device_id):
-    """Mark device as busy in dev_devices collection."""
+    """Mark device as busy in dev_devices collection using device serial."""
     client = None
     try:
         client = get_mongo_client()
         collection = client[MINI_DB_NAME]["dev_devices"]
         
         result = collection.update_one(
-            {"_id": ObjectId(device_id)},
+            {"device": device_id},
             {
                 "$set": {
                     "available": False,
@@ -191,14 +191,14 @@ def mark_device_busy(device_id):
 
 
 def mark_device_available(device_id):
-    """Mark device as available in dev_devices collection."""
+    """Mark device as available in dev_devices collection using device serial."""
     client = None
     try:
         client = get_mongo_client()
         collection = client[MINI_DB_NAME]["dev_devices"]
         
         result = collection.update_one(
-            {"_id": ObjectId(device_id)},
+            {"device": device_id},
             {
                 "$set": {
                     "available": True,
@@ -218,6 +218,55 @@ def mark_device_available(device_id):
         raise
     except Exception as e:
         logger.error(f"Error marking device available: {e}")
+        raise
+    finally:
+        if client:
+            client.close()
+
+
+def register_device(device_name=None, device_info=None):
+    """
+    Register a new device in dev_devices collection.
+    
+    Args:
+        device_name: Optional device name/identifier
+        device_info: Optional additional device information (dict)
+    
+    Returns:
+        device_id: The ObjectId string of the newly registered device
+    """
+    client = None
+    try:
+        client = get_mongo_client()
+        collection = client[MINI_DB_NAME]["dev_devices"]
+        
+        # Create device document
+        device_doc = {
+            "available": True,
+            "online": True,
+            "last_updated": datetime.now(),
+            "created_at": datetime.now()
+        }
+        
+        # Add optional fields
+        if device_name:
+            device_doc["device_name"] = device_name
+        
+        if device_info:
+            device_doc.update(device_info)
+        
+        # Insert device
+        result = collection.insert_one(device_doc)
+        device_id = str(result.inserted_id)
+        
+        logger.info(f"Registered new device: {device_id} (name: {device_name or 'N/A'})")
+        return device_id
+    
+    except PyMongoError as e:
+        logger.error(f"MongoDB error registering device: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Error registering device: {e}")
         raise
     finally:
         if client:
