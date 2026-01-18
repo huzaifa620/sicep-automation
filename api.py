@@ -7,9 +7,12 @@ import os
 
 from automation import process_sisec_task
 from database import update_rw, mark_device_busy, mark_device_available
-from pdf_utils import extract_pdf_data_dummy
 from pymongo.errors import PyMongoError
 from bson import ObjectId
+import pdfplumber
+import subprocess
+import tempfile
+from readPdf import leyendopdf
 
 load_dotenv(override=True)
 
@@ -40,6 +43,94 @@ logger = logging.getLogger(__name__)
 
 # Track if we're currently processing a task
 is_processing = False
+
+
+def extract_pdf_data(pdf_path: str, curp: str):
+    """
+    Extract data from PDF file using readPdf module.
+    Wrapper function that handles device paths and uses leyendopdf from readPdf.
+    
+    Args:
+        pdf_path: Path to the PDF file (can be local path or Android device path)
+        curp: CURP value for validation/logging
+    
+    Returns:
+        dict: Extracted PDF data with fields like Nombre, curp_sc, nss_final, 
+              detalle_semanas, job_cotizations, etc.
+    """
+    local_pdf_path = None
+    temp_file = None
+    
+    try:
+        # Check if it's a device path (starts with /storage/ or /sdcard/)
+        is_device_path = pdf_path.startswith('/storage/') or pdf_path.startswith('/sdcard/')
+        
+        if is_device_path:
+            # Pull PDF from device to temporary file
+            logger.info(f"Pulling PDF from device: {pdf_path}")
+            temp_dir = tempfile.gettempdir()
+            filename = os.path.basename(pdf_path) or f"{curp}.pdf"
+            local_pdf_path = os.path.join(temp_dir, filename)
+            
+            # Use adb pull to get the file
+            pull_cmd = ['adb', 'pull', pdf_path, local_pdf_path]
+            result = subprocess.run(
+                pull_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                raise Exception(f"Failed to pull PDF from device: {result.stderr}")
+            
+            if not os.path.exists(local_pdf_path):
+                raise Exception(f"PDF file not found after pull: {local_pdf_path}")
+            
+            logger.info(f"Successfully pulled PDF to: {local_pdf_path}")
+            temp_file = local_pdf_path
+        else:
+            # Use local path directly
+            if not os.path.exists(pdf_path):
+                raise Exception(f"PDF file not found: {pdf_path}")
+            local_pdf_path = pdf_path
+        
+        # Open PDF with pdfplumber
+        with pdfplumber.open(local_pdf_path) as pdf:
+            # Use leyendopdf from readPdf to extract data
+            data = leyendopdf(pdf)
+            
+            if data:
+                # Ensure curp is included in the returned data
+                if 'curp_sc' not in data or not data.get('curp_sc'):
+                    # Try to extract CURP from the data or use provided curp
+                    data['curp'] = curp
+                
+                return data
+            else:
+                # Return minimal structure if extraction failed
+                return {
+                    "curp": curp,
+                    "error": "Failed to extract data from PDF"
+                }
+                
+    except Exception as e:
+        logger.error(f"Error extracting PDF data from {pdf_path}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        # Return minimal structure with error
+        return {
+            "curp": curp,
+            "error": f"PDF extraction error: {str(e)}"
+        }
+    finally:
+        # Clean up temporary file if we pulled it from device
+        if temp_file and os.path.exists(temp_file) and is_device_path:
+            try:
+                os.remove(temp_file)
+                logger.info(f"Cleaned up temporary file: {temp_file}")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temp file {temp_file}: {cleanup_error}")
 
 
 def validate_request(data):
@@ -167,7 +258,7 @@ def process_task_background(curp, device_id, taskid, queue_document_id, nbc_id):
         if pdf_path and condition == 1:
             try:
                 logger.info(f"Extracting PDF data for Condition 1 - PDF path: {pdf_path}")
-                extracted_data = extract_pdf_data_dummy(pdf_path, curp)
+                extracted_data = extract_pdf_data(pdf_path, curp)
                 logger.info(f"PDF data extraction completed for CURP: {curp}")
             except Exception as pdf_error:
                 logger.error(f"Error extracting PDF data: {pdf_error}")

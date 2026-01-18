@@ -1017,9 +1017,8 @@ def wait_for_email_and_download(driver, curp, download_dir):
                             for elem in root.iter():
                                 text = elem.get("text", "").strip()
                                 if subdelegacion_text in text:
-                                    full_message = text[:500]  # Get first 500 chars
                                     logger.info("Found subdelegación message - Condition 2")
-                                    return (2, full_message, None)
+                                    return (2, "Los datos registrados en el IMSS asociados a la CURP, presentan alguna inconsistencia, por favor acude a tu Subdelegación para obtener tu Número de Seguridad Social; presentando: CURP, Acta de Nacimiento e Identificación Oficial.", None)
                         except:
                             pass
                         logger.error("No PDF found and no subdelegación message - Condition 4")
@@ -1046,9 +1045,8 @@ def wait_for_email_and_download(driver, curp, download_dir):
                 for elem in root.iter():
                     text = elem.get("text", "").strip()
                     if subdelegacion_text in text:
-                        full_message = text[:500]
                         logger.info("Found subdelegación message - Condition 2")
-                        return (2, full_message, None)
+                        return (2, "Los datos registrados en el IMSS asociados a la CURP, presentan alguna inconsistencia, por favor acude a tu Subdelegación para obtener tu Número de Seguridad Social; presentando: CURP, Acta de Nacimiento e Identificación Oficial.", None)
             except:
                 pass
             logger.error("No PDF found and no subdelegación message - Condition 4")
@@ -1109,9 +1107,8 @@ def wait_for_email_and_download(driver, curp, download_dir):
             for elem in root.iter():
                 text = elem.get("text", "").strip()
                 if subdelegacion_text in text:
-                    full_message = text[:500]
                     logger.info("Found subdelegación message - Condition 2")
-                    return (2, full_message, None)
+                    return (2, "Los datos registrados en el IMSS asociados a la CURP, presentan alguna inconsistencia, por favor acude a tu Subdelegación para obtener tu Número de Seguridad Social; presentando: CURP, Acta de Nacimiento e Identificación Oficial.", None)
         except:
             pass
         raise Exception("Could not find downloaded PDF")
@@ -1241,10 +1238,46 @@ def process_sisec_task(curp, device_id, taskid, queue_document_id, nbc_id):
     try:
         logger.info(f"Starting SISEC task - CURP: {curp}, TaskID: {taskid}")
         
+        # Check if this is already a subdelegación case (Condition 2)
+        try:
+            from pymongo import MongoClient
+            from bson import ObjectId
+            import os
+            from dotenv import load_dotenv
+            
+            load_dotenv(override=True)
+            mongo_uri = os.getenv("MONGO_URI", "")
+            
+            if mongo_uri:
+                client = MongoClient(mongo_uri)
+                collection = client["Main_User"]["Nueva_Base_Central"]
+                doc = collection.find_one({"_id": ObjectId(nbc_id)})
+                client.close()
+                
+                if doc and "nss" in doc:
+                    nss_obj = doc.get("nss", {})
+                    if isinstance(nss_obj, dict) and nss_obj.get("status") == "subdelegacion":
+                        logger.info(f"NSS status is 'subdelegacion' in database - returning Condition 2 immediately")
+                        return {
+                            'condition': 2,
+                            'message': 'Los datos registrados en el IMSS asociados a la CURP, presentan alguna inconsistencia, por favor acude a tu Subdelegación para obtener tu Número de Seguridad Social; presentando: CURP, Acta de Nacimiento e Identificación Oficial.',
+                            'status': 'Complete',
+                            'pdf_path': None
+                        }
+        except Exception as e:
+            logger.warning(f"Error checking NSS status: {e}, continuing with automation")
+        
         # Get NSS from database or use fallback
         nss = get_nss_from_db(nbc_id)
         if not nss:
-            raise Exception("NSS is required but not found in database or environment")
+            # NSS is required - return Condition 2 without submitting form
+            logger.warning("NSS not found in database or environment - returning Condition 2 without query")
+            return {
+                'condition': 2,
+                'message': 'Los datos registrados en el IMSS asociados a la CURP, presentan alguna inconsistencia, por favor acude a tu Subdelegación para obtener tu Número de Seguridad Social; presentando: CURP, Acta de Nacimiento e Identificación Oficial.',
+                'status': 'Complete',
+                'pdf_path': None
+            }
         
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
