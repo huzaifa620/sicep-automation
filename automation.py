@@ -1201,8 +1201,8 @@ def get_nss_from_db(nbc_id):
         
         if doc and "nss" in doc:
             nss_obj = doc.get("nss", {})
-            if isinstance(nss_obj, dict) and "value" in nss_obj:
-                return nss_obj["value"]
+            if isinstance(nss_obj, dict) and "nss" in nss_obj:
+                return nss_obj["nss"]
             elif isinstance(nss_obj, str):
                 return nss_obj
         

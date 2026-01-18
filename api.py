@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 import os
 
 from automation import process_sisec_task
-from database import update_rw, mark_device_busy, mark_device_available, get_mongo_client
+from database import update_rw, mark_device_busy, mark_device_available
+from pdf_utils import extract_pdf_data_dummy
 from pymongo.errors import PyMongoError
 from bson import ObjectId
 
@@ -160,20 +161,29 @@ def process_task_background(curp, device_id, taskid, queue_document_id, nbc_id):
         
         logger.info(f"Task completed - Condition: {condition}, Status: {status}")
         
-        # Update database based on result
+        # If we got a PDF (Condition 1), extract data from it
+        extracted_data = None
+        
+        if pdf_path and condition == 1:
+            try:
+                logger.info(f"Extracting PDF data for Condition 1 - PDF path: {pdf_path}")
+                extracted_data = extract_pdf_data_dummy(pdf_path, curp)
+                logger.info(f"PDF data extraction completed for CURP: {curp}")
+            except Exception as pdf_error:
+                logger.error(f"Error extracting PDF data: {pdf_error}")
+                import traceback
+                logger.error(traceback.format_exc())
+                # Continue with database update even if PDF extraction fails
+        
+        # Update database based on result (including extracted data if available)
         update_rw(
             curp=curp,
             condition=condition,
             message=message,
             status=status,
-            queue_document_id=queue_document_id
+            queue_document_id=queue_document_id,
+            extracted_data=extracted_data
         )
-        
-        # If we got a PDF (Condition 1), we'd process it here
-        # For now, we just log it
-        if pdf_path:
-            logger.info(f"PDF downloaded at: {pdf_path}")
-            # TODO: Extract PDF data and update imss collection
         
     except Exception as e:
         logger.error(f"Error in background processing: {e}")
